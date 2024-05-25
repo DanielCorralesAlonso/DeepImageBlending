@@ -12,6 +12,7 @@ import pdb
 import os
 import imageio.v2 as iio
 import torch.nn.functional as F
+import pdb
 
 
 
@@ -44,7 +45,9 @@ mask_file = opt.mask_file
 target_file = opt.target_file
 
 # Hyperparameter Inputs
-gpu_id = opt.gpu_id
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+gpu_id =  device #opt.gpu_id
 num_steps = opt.num_steps
 ss = opt.ss; # source image size
 ts = opt.ts # target image size
@@ -94,82 +97,100 @@ if opt.save_video:
 
 run = [0]
 while run[0] <= num_steps:
-    
-    def closure():
-        # Composite Foreground and Background to Make Blended Image
-        blend_img = torch.zeros(target_img.shape).to(gpu_id)
-        blend_img = input_img*canvas_mask + target_img*(canvas_mask-1)*(-1) 
+    try: 
+        def closure():
         
-        # Compute Laplacian Gradient of Blended Image
-        pred_gradient = laplacian_filter_tensor(blend_img, gpu_id)
-        
-        # Compute Gradient Loss
-        grad_loss = 0
-        for c in range(len(pred_gradient)):
-            grad_loss += mse(pred_gradient[c], gt_gradient[c])
-        grad_loss /= len(pred_gradient)
-        grad_loss *= grad_weight
-        
-        # Compute Style Loss
-        target_features_style = vgg(mean_shift(target_img))
-        target_gram_style = [gram_matrix(y) for y in target_features_style]
-        
-        blend_features_style = vgg(mean_shift(input_img))
-        blend_gram_style = [gram_matrix(y) for y in blend_features_style]
-        
-        style_loss = 0
-        for layer in range(len(blend_gram_style)):
-            style_loss += mse(blend_gram_style[layer], target_gram_style[layer])
-        style_loss /= len(blend_gram_style)  
-        style_loss *= style_weight           
+            # Composite Foreground and Background to Make Blended Image
+            blend_img = torch.zeros(target_img.shape).to(gpu_id)
+            blend_img = input_img*canvas_mask + target_img*(canvas_mask-1)*(-1) 
+            
+            # Compute Laplacian Gradient of Blended Image
+            pred_gradient = laplacian_filter_tensor(blend_img, gpu_id)
+            
+            # Compute Gradient Loss
+            grad_loss = 0
+            for c in range(len(pred_gradient)):
+                grad_loss += mse(pred_gradient[c], gt_gradient[c])
+            grad_loss /= len(pred_gradient)
+            grad_loss *= grad_weight
+            
+            # Compute Style Loss
+            target_features_style = vgg(mean_shift(target_img))
+            target_gram_style = [gram_matrix(y) for y in target_features_style]
+            
+            blend_features_style = vgg(mean_shift(input_img))
+            blend_gram_style = [gram_matrix(y) for y in blend_features_style]
+            
+            style_loss = 0
+            for layer in range(len(blend_gram_style)):
+                style_loss += mse(blend_gram_style[layer], target_gram_style[layer])
+            style_loss /= len(blend_gram_style)  
+            style_loss *= style_weight           
 
-        
-        # Compute Content Loss
-        blend_obj = blend_img[:,:,int(x_start-source_img.shape[2]*0.5):int(x_start+source_img.shape[2]*0.5), int(y_start-source_img.shape[3]*0.5):int(y_start+source_img.shape[3]*0.5)]
-        source_object_features = vgg(mean_shift(source_img*mask_img))
-        blend_object_features = vgg(mean_shift(blend_obj*mask_img))
-        content_loss = content_weight * mse(blend_object_features.relu2_2, source_object_features.relu2_2)
-        content_loss *= content_weight
-        
-        # Compute TV Reg Loss
-        tv_loss = torch.sum(torch.abs(blend_img[:, :, :, :-1] - blend_img[:, :, :, 1:])) + \
-                   torch.sum(torch.abs(blend_img[:, :, :-1, :] - blend_img[:, :, 1:, :]))
-        tv_loss *= tv_weight
-        
-        # Compute Total Loss and Update Image
-        loss = grad_loss + style_loss + content_loss + tv_loss
-        optimizer.zero_grad()
-        loss.backward()
+            
+            # Compute Content Loss
+            blend_obj = blend_img[:,:,int(x_start-source_img.shape[2]*0.5):int(x_start+source_img.shape[2]*0.5), int(y_start-source_img.shape[3]*0.5):int(y_start+source_img.shape[3]*0.5)]
+            source_object_features = vgg(mean_shift(source_img*mask_img))
+            blend_object_features = vgg(mean_shift(blend_obj*mask_img))
+            content_loss = content_weight * mse(blend_object_features.relu2_2, source_object_features.relu2_2)
+            content_loss *= content_weight
+            
+            # Compute TV Reg Loss
+            tv_loss = torch.sum(torch.abs(blend_img[:, :, :, :-1] - blend_img[:, :, :, 1:])) + \
+                    torch.sum(torch.abs(blend_img[:, :, :-1, :] - blend_img[:, :, 1:, :]))
+            tv_loss *= tv_weight
+            
+            # Compute Total Loss and Update Image
+            loss = grad_loss + style_loss + content_loss + tv_loss
+            optimizer.zero_grad()
+            loss.backward()
 
-        # Write to output to a reconstruction video 
-        if opt.save_video:
-            foreground = input_img*canvas_mask
-            foreground = (foreground - foreground.min()) / (foreground.max() - foreground.min())
-            background = target_img*(canvas_mask-1)*(-1)
-            background = background / 255.0
-            final_blend_img =  + foreground + background
-            if run[0] < 200:
-                # more frames for early optimization by repeatedly appending the frames
-                for _ in range(10):
+            # Write to output to a reconstruction video 
+            if opt.save_video:
+                foreground = input_img*canvas_mask
+                foreground = (foreground - foreground.min()) / (foreground.max() - foreground.min())
+                background = target_img*(canvas_mask-1)*(-1)
+                background = background / 255.0
+                final_blend_img =  + foreground + background
+                if run[0] < 200:
+                    # more frames for early optimization by repeatedly appending the frames
+                    for _ in range(10):
+                        recon_process_video.append_data(final_blend_img[0].transpose(0,2).transpose(0,1).cpu().data.numpy())
+                else:
                     recon_process_video.append_data(final_blend_img[0].transpose(0,2).transpose(0,1).cpu().data.numpy())
-            else:
-                recon_process_video.append_data(final_blend_img[0].transpose(0,2).transpose(0,1).cpu().data.numpy())
+            
+            # Print Loss
+            if run[0] % 1 == 0:
+                print("run {}:".format(run))
+                print('grad : {:4f}, style : {:4f}, content: {:4f}, tv: {:4f}'.format(\
+                            grad_loss.item(), \
+                            style_loss.item(), \
+                            content_loss.item(), \
+                            tv_loss.item()
+                            ))
+                print()
+
+
+            if run[0] % 100 == 0:
+                foreground = input_img*canvas_mask
+                foreground = (foreground - foreground.min()) / (foreground.max() - foreground.min())
+                background = target_img*(canvas_mask-1)*(-1)
+                background = background / 255.0
+                final_blend_img =  + foreground + background
+
+                first_pass_img_file = os.path.join(opt.output_dir, f'first_pass_step_{run[0]}.png')
+                imsave(first_pass_img_file, blend_img_np.astype(np.uint8))
+
+            
+            run[0] += 1
+            return loss
         
-        # Print Loss
-        if run[0] % 1 == 0:
-            print("run {}:".format(run))
-            print('grad : {:4f}, style : {:4f}, content: {:4f}, tv: {:4f}'.format(\
-                          grad_loss.item(), \
-                          style_loss.item(), \
-                          content_loss.item(), \
-                          tv_loss.item()
-                          ))
-            print()
-        
-        run[0] += 1
-        return loss
+        optimizer.step(closure)
+
+    except KeyboardInterrupt:
+        print("Keyboard Interrupted")
+        break
     
-    optimizer.step(closure)
 
 # clamp the pixels range into 0 ~ 255
 input_img.data.clamp_(0, 255)
@@ -210,51 +231,55 @@ optimizer = get_input_optimizer(first_pass_img)
 print('Optimizing...')
 run = [0]
 while run[0] <= num_steps:
-    
-    def closure():
-        
-        # Compute Loss Loss    
-        target_features_style = vgg(mean_shift(target_img))
-        target_gram_style = [gram_matrix(y) for y in target_features_style]
-        blend_features_style = vgg(mean_shift(first_pass_img))
-        blend_gram_style = [gram_matrix(y) for y in blend_features_style]
-        style_loss = 0
-        for layer in range(len(blend_gram_style)):
-            style_loss += mse(blend_gram_style[layer], target_gram_style[layer])
-        style_loss /= len(blend_gram_style)  
-        style_loss *= style_weight        
-        
-        # Compute Content Loss
-        content_features = vgg(mean_shift(first_pass_img))
-        content_loss = content_weight * mse(blend_features_style.relu2_2, content_features.relu2_2)
-        
-        # Compute Total Loss and Update Image
-        loss = style_loss + content_loss
-        optimizer.zero_grad()
-        loss.backward()
+    try: 
+        def closure():
+            
+            # Compute Loss Loss    
+            target_features_style = vgg(mean_shift(target_img))
+            target_gram_style = [gram_matrix(y) for y in target_features_style]
+            blend_features_style = vgg(mean_shift(first_pass_img))
+            blend_gram_style = [gram_matrix(y) for y in blend_features_style]
+            style_loss = 0
+            for layer in range(len(blend_gram_style)):
+                style_loss += mse(blend_gram_style[layer], target_gram_style[layer])
+            style_loss /= len(blend_gram_style)  
+            style_loss *= style_weight        
+            
+            # Compute Content Loss
+            content_features = vgg(mean_shift(first_pass_img))
+            content_loss = content_weight * mse(blend_features_style.relu2_2, content_features.relu2_2)
+            
+            # Compute Total Loss and Update Image
+            loss = style_loss + content_loss
+            optimizer.zero_grad()
+            loss.backward()
 
-        # Write to output to a reconstruction video 
-        if opt.save_video:
-            foreground = first_pass_img*canvas_mask
-            foreground = (foreground - foreground.min()) / (foreground.max() - foreground.min())
-            background = target_img*(canvas_mask-1)*(-1)
-            background = background / 255.0
-            final_blend_img =  + foreground + background
-            recon_process_video.append_data(final_blend_img[0].transpose(0,2).transpose(0,1).cpu().data.numpy())
+            # Write to output to a reconstruction video 
+            if opt.save_video:
+                foreground = first_pass_img*canvas_mask
+                foreground = (foreground - foreground.min()) / (foreground.max() - foreground.min())
+                background = target_img*(canvas_mask-1)*(-1)
+                background = background / 255.0
+                final_blend_img =  + foreground + background
+                recon_process_video.append_data(final_blend_img[0].transpose(0,2).transpose(0,1).cpu().data.numpy())
+            
+            # Print Loss
+            if run[0] % 1 == 0:
+                print("run {}:".format(run))
+                print(' style : {:4f}, content: {:4f}'.format(\
+                            style_loss.item(), \
+                            content_loss.item()
+                            ))
+                print()
+            
+            run[0] += 1
+            return loss
         
-        # Print Loss
-        if run[0] % 1 == 0:
-            print("run {}:".format(run))
-            print(' style : {:4f}, content: {:4f}'.format(\
-                          style_loss.item(), \
-                          content_loss.item()
-                          ))
-            print()
-        
-        run[0] += 1
-        return loss
+        optimizer.step(closure)
     
-    optimizer.step(closure)
+    except KeyboardInterrupt:
+        print("Keyboard Interrupted")
+        break
 
 # clamp the pixels range into 0 ~ 255
 first_pass_img.data.clamp_(0, 255)
